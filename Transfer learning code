@@ -4,14 +4,14 @@ import numpy as np
 import pandas as pd
 import multiprocessing
 import tensorflow as tf
-import matplotlib
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras import backend as K
 from keras.models import load_model
 import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import mean_squared_error
 import warnings
+
 warnings.filterwarnings('ignore', category=FutureWarning)
 
 # Environment Setup
@@ -32,7 +32,11 @@ if gpus:
 data = pd.read_csv('sandy_1992.csv', header=0, parse_dates=[0])
 DateTime = data[['Date', 'Time (GMT)']]
 data = data.drop(columns=['Date', 'Time (GMT)'])
-location = "datsandy1992"
+print("Target station data imported! Loading LSTM-SAM models...")
+
+# Output directory
+location = "Results"
+os.makedirs(location, exist_ok=True)
 
 # Preprocess Data
 X = data.iloc[:, :-1]
@@ -49,19 +53,19 @@ y_reshaped = y.values.reshape(-1, 1)
 y_scaled = scaler_y.fit_transform(y_reshaped)
 
 def create_rnn_dataset(X_norm, y_scaled, lookback):
-    X, y = [], []
+    Xs, ys = [], []
     for i in range(len(X_norm) - lookback):
-        X.append(X_norm[i:(i + lookback)])
-        y.append(y_scaled[(i + lookback)])
-    return np.array(X), np.array(y)
+        Xs.append(X_norm[i:(i + lookback)])
+        ys.append(y_scaled[i + lookback])
+    return np.array(Xs), np.array(ys)
 
 class CustomAttentionLayer(tf.keras.layers.Layer):
     def __init__(self, emphasis_factor=1.5, **kwargs):
         self.emphasis_factor = emphasis_factor
-        super(CustomAttentionLayer, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def get_config(self):
-        config = super(CustomAttentionLayer, self).get_config()
+        config = super().get_config()
         config.update({"emphasis_factor": self.emphasis_factor})
         return config
 
@@ -74,236 +78,161 @@ class CustomAttentionLayer(tf.keras.layers.Layer):
                                  initializer='zeros',
                                  trainable=True,
                                  name='bias')
-        super(CustomAttentionLayer, self).build(input_shape)
+        super().build(input_shape)
 
     def call(self, x):
         e = K.tanh(K.dot(x, self.W) + self.b)
-        # Compute attention scores
         a = K.softmax(e, axis=1)
-
-        # Identify top 10% values
         k_value = tf.cast(tf.cast(tf.shape(a)[1], tf.float32) * 0.1, tf.int32)
-        top_10_percent_idx = tf.math.top_k(a, k=tf.math.maximum(1, k_value))[1]
-        mask = tf.reduce_any(tf.equal(tf.range(tf.shape(a)[1])[None, :], top_10_percent_idx[:, :, None]), axis=1)
-
-        # Apply emphasis
-        emphasized_a = tf.where(mask, a * self.emphasis_factor, a)
-        output = x * emphasized_a
-
-        summed_output = K.sum(output, axis=1, keepdims=True)
-        return summed_output
+        top_idx = tf.math.top_k(a, k=tf.math.maximum(1, k_value))[1]
+        mask = tf.reduce_any(
+            tf.equal(tf.range(tf.shape(a)[1])[None, :], top_idx[:, :, None]), axis=1
+        )
+        emphasized = tf.where(mask, a * self.emphasis_factor, a)
+        output = x * emphasized
+        return K.sum(output, axis=1, keepdims=True)
 
     def compute_output_shape(self, input_shape):
-        return input_shape[0], input_shape[-1]
-    
+        return (input_shape[0], input_shape[-1])
+
 def kge(y_true, y_pred):
-    """
-    Compute Kling-Gupta Efficiency (KGE).
-    """
     r, _ = pearsonr(y_true, y_pred)
     alpha = np.std(y_pred) / np.std(y_true)
     beta = np.mean(y_pred) / np.mean(y_true)
-    
     return 1 - np.sqrt((r - 1)**2 + (alpha - 1)**2 + (beta - 1)**2)
 
 def nse(y_true, y_pred):
-    """
-    Compute Nash-Sutcliffe Efficiency (NSE).
-    """
-    numerator = np.sum((y_true - y_pred) ** 2)
-    denominator = np.sum((y_true - np.mean(y_true)) ** 2)
-    return 1 - (numerator / denominator)
+    num = np.sum((y_true - y_pred)**2)
+    den = np.sum((y_true - np.mean(y_true))**2)
+    return 1 - num/den
 
 def amb(y_true, y_pred):
-    """
-    Compute Absolute Mean Bias.
-    """
     return np.mean(np.abs(y_true - y_pred))
 
-# Metrics and visualization
 def willmott_skill(y_true, y_pred):
     obs_mean = np.mean(y_true)
-    numerator = np.sum((y_true - y_pred) ** 2)
-    denominator = np.sum((np.abs(y_pred - obs_mean) + np.abs(y_true - obs_mean)) ** 2)
-    d = 1 - (numerator / denominator)
-    return d
+    num = np.sum((y_true - y_pred)**2)
+    den = np.sum((np.abs(y_pred - obs_mean) + np.abs(y_true - obs_mean))**2)
+    return 1 - num/den
 
 def evaluate_and_plot(model, X_test_rnn, y_test_rnn, scaler_y, filename_prefix):
-    test_loss = model.evaluate(X_test_rnn, y_test_rnn, verbose=1)
-    test_predictions = model.predict(X_test_rnn)
+    # Evaluate and predict
+    _ = model.evaluate(X_test_rnn, y_test_rnn, verbose=1)
+    preds = model.predict(X_test_rnn)
 
-    # Convert to original scale
-    test_predictions_original = scaler_y.inverse_transform(test_predictions)
-    y_test_original = scaler_y.inverse_transform(y_test_rnn)
+    # Inverse scale
+    y_true = scaler_y.inverse_transform(y_test_rnn)
+    y_pred = scaler_y.inverse_transform(preds)
 
-    # Use all data
-    test_predictions_filtered = test_predictions_original
-    y_test_filtered = y_test_original
+    # Metrics
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    kge_v = kge(y_true.flatten(), y_pred.flatten())
+    nse_v = nse(y_true.flatten(), y_pred.flatten())
+    d_v = willmott_skill(y_true.flatten(), y_pred.flatten())
+    amb_v = amb(y_true.flatten(), y_pred.flatten())
 
-    # Calculate Metrics using all data
-    amb_value = amb(y_test_filtered.flatten(), test_predictions_filtered.flatten())
-    mse = mean_squared_error(y_test_filtered, test_predictions_filtered)
-    rmse = np.sqrt(mse)
-    kge_value = kge(y_test_filtered.flatten(), test_predictions_filtered.flatten())
-    nse_value = nse(y_test_filtered.flatten(), test_predictions_filtered.flatten())
-    d = willmott_skill(y_test_filtered.flatten(), test_predictions_filtered.flatten())
-    
-    # Metrics text
-    metrics_text = [f'RMSE: {rmse:.4f}', f'KGE: {kge_value:.4f}', f'NSE: {nse_value:.4f}', 
-                    f"Willmott's d: {d:.4f}", f'mBias: {amb_value:.4f}']
-    
-    # Plotting using all data
-    plt.figure(figsize=(10, 5))
-    plt.plot(y_test_filtered, 'r--', label='Actual water level')
-    plt.plot(test_predictions_filtered, label='Predicted water level')
+    metrics_text = [
+        f'RMSE: {rmse:.4f}', f'KGE: {kge_v:.4f}',
+        f'NSE: {nse_v:.4f}', f"Willmott's d: {d_v:.4f}",
+        f'mBias: {amb_v:.4f}'
+    ]
 
-    # Create dummy plots for metrics text
+    # Plot both subplots side by side
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Time series plot (no legend)
+    ax1.plot(y_true, 'r--', label='Actual')
+    ax1.plot(y_pred, label='Predicted')
     for text in metrics_text:
-        plt.plot([], [], ' ', label=text)
+        ax1.plot([], [], ' ', label=text)
+    ax1.set_xlabel('Time (h)')
+    ax1.set_ylabel('Water level (m)')
+    ax1.set_title(f'Sandy hook, NJ ({filename_prefix})')
 
-    plt.xlabel('Time (h)')
-    plt.ylabel('Water level (m)')
-    plt.title(f'Sandy hook, NJ ({prefix})')
-    plt.legend(loc='best')
-
-    plt.savefig(f"{location}/{prefix}.png", bbox_inches='tight', dpi=300)
-#     plt.show()
-
-    # One-to-One Plot using all data
-    plt.figure(figsize=(6, 6))
-    max_val = max(y_test_filtered.max(), test_predictions_filtered.max())
-    min_val = min(y_test_filtered.min(), test_predictions_filtered.min())
-
-    # One-to-one line
-    plt.plot([min_val, max_val], [min_val, max_val], 'k--', label='One-to-one line')
-
-    # Scatter plot of predictions vs actual
-    plt.scatter(y_test_filtered, test_predictions_filtered, alpha=0.7, label='Predicted water level')
-    plt.scatter(y_test_filtered, y_test_filtered, color='red', s=5, label='Actual water level')
-
-    # Metrics text
-    metrics_text = [f'RMSE: {rmse:.4f}', f'KGE: {kge_value:.4f}', f'NSE: {nse_value:.4f}', 
-                    f"Willmott's d: {d:.4f}", f'mBias: {amb_value:.4f}']
-
-    # Create dummy plots for metrics text
+    # One-to-one scatter with legend
+    mn, mx = min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())
+    ax2.plot([mn, mx], [mn, mx], 'k--', label='1:1 line')
+    ax2.scatter(y_true, y_pred, alpha=0.7, label='Predicted')
+    ax2.scatter(y_true, y_true, s=5, label='Actual')
     for text in metrics_text:
-        plt.plot([], [], ' ', label=text)
+        ax2.plot([], [], ' ', label=text)
+    ax2.set_xlabel('Actual (m)')
+    ax2.set_ylabel('Predicted (m)')
+    ax2.set_title(f'Sandy hook, NJ ({filename_prefix})')
+    ax2.legend(loc='best')
 
-    plt.xlabel('Actual water level (m)')
-    plt.ylabel('Predicted water level (m)')
-    plt.title(f'Sandy hook, NJ ({prefix})')
-
-    # Legend
-    plt.legend(loc='best')
-
-    # Save and show the plot
-    plt.savefig(f"{location}/{prefix}_one_to_one.png", bbox_inches='tight', dpi=300)
+    plt.tight_layout()
+    fig.savefig(f"{location}/{filename_prefix}_combined.png", dpi=300, bbox_inches='tight')
     plt.show()
 
-    return rmse, kge_value, nse_value, d, amb_value
+    return rmse, kge_v, nse_v, d_v, amb_v
 
 def extract_lookback_from_filename(filename):
-    # Find the position of 'h' in the filename
-    h_position = filename.find('h')
-    
-    # Check if the character before 'h' is a digit
-    if filename[h_position-1].isdigit():
-        # If the character two positions before 'h' is also a digit, extract both digits
-        if filename[h_position-2].isdigit():
-            lookback = int(filename[h_position-2:h_position])
-        else:
-            lookback = int(filename[h_position-1:h_position])
-    else:
-        lookback = None
-
-    return lookback
+    h_pos = filename.find('h')
+    if h_pos > 0 and filename[h_pos-1].isdigit():
+        start = h_pos-2 if h_pos>1 and filename[h_pos-2].isdigit() else h_pos-1
+        return int(filename[start:h_pos])
+    return None
 
 def extract_prefix_from_filename(filename):
-    # Extract the prefix substring before ".h5" in the filename
     return filename.split(".h5")[0]
 
-def extract_and_save_all(test_predictions_original, y_test_original, lookback, DateTime, prefix, filename):
-    # Use all indices
-    indices = np.arange(len(y_test_original.flatten()))
-    
-    # Modifying the column name for prediction data to be in lowercase, remove "lstm", and adding "cv" as a suffix
-    prediction_column_name = prefix.replace("lstm", "")
-    
-    data_full = pd.DataFrame({
-        'Actual water level': y_test_original.flatten()[indices],
-        prediction_column_name: test_predictions_original.flatten()[indices]
+def extract_and_save_all(test_pred, y_true, lookback, DateTime, prefix, filename):
+    # Ensure parent directory exists
+    dirpath = os.path.dirname(filename)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
+
+    indices = np.arange(len(y_true.flatten()))
+    pred_col = prefix.replace("lstm", "")
+    df = pd.DataFrame({
+        'Actual water level': y_true.flatten()[indices],
+        pred_col: test_pred.flatten()[indices]
     })
-    
-    # Adjust the indices for the lookback period
-    indices_adjusted = [index + lookback for index in indices]
-    
-    # Extract the corresponding date and time from the DateTime dataframe
-    dates = DateTime['Date'].iloc[indices_adjusted]
-    times = DateTime['Time (GMT)'].iloc[indices_adjusted]
-    data_full['Date'] = dates.values
-    data_full['Time (GMT)'] = times.values
-    
-    # Convert 'Date' column to datetime64[ns] dtype
-    data_full['Date'] = pd.to_datetime(data_full['Date'])
-    
-    # Rearrange columns using the modified column name
-    data_full = data_full[['Date', 'Time (GMT)', 'Actual water level', prediction_column_name]]
-    
-    # If the file doesn't exist, create one
+
+    # adjust for lookback
+    idx_adj = indices + lookback
+    df['Date'] = DateTime['Date'].iloc[idx_adj].values
+    df['Time (GMT)'] = DateTime['Time (GMT)'].iloc[idx_adj].values
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df[['Date', 'Time (GMT)', 'Actual water level', pred_col]]
+
     if not os.path.exists(filename):
-        data_full.to_csv(filename, index=False)
+        df.to_csv(filename, index=False)
     else:
-        # If file exists, load the existing data
-        existing_data = pd.read_csv(filename)
+        existing = pd.read_csv(filename)
+        existing['Date'] = pd.to_datetime(existing['Date'])
+        existing = existing.drop(columns=[pred_col], errors='ignore')
+        merged = existing.merge(
+            df[['Date', 'Time (GMT)', pred_col]],
+            on=['Date', 'Time (GMT)'], how='left'
+        )
+        merged.to_csv(filename, index=False)
 
-        # Convert 'Date' column to datetime64[ns] dtype
-        existing_data['Date'] = pd.to_datetime(existing_data['Date'])
+    return df
 
-        # Merge with the new prediction column, replacing the existing column if it exists
-        existing_data = existing_data.drop(columns=[prediction_column_name], errors='ignore')
-        existing_data = existing_data.merge(data_full[['Date', 'Time (GMT)', prediction_column_name]], 
-                                    on=['Date', 'Time (GMT)'], how='left')
-
-        existing_data.to_csv(filename, index=False)
-
-    return data_full
-
-# Get a list of all the files in the directory
+# Main loop: load each model, evaluate, plot, and save results
 all_files = os.listdir()
+model_files = [f for f in all_files if f.endswith(".h5")]
+lookbacks = [extract_lookback_from_filename(f) for f in model_files]
+prefixes = [extract_prefix_from_filename(f) for f in model_files]
 
-# Filter out the files that end with ".h5"
-model_files = [file for file in all_files if file.endswith(".h5")]
+print("Starting predictions...")
 
-# Extracting the lookbacks from the model filenames again
-lookbacks = [extract_lookback_from_filename(model_file) for model_file in model_files]
-
-# Extracting the prefixes from the model filenames
-prefixes = [extract_prefix_from_filename(model_file) for model_file in model_files]
-
-folder_name = 'Lewes'
-
-# Check if the folder exists, and create it if it doesn't
-if not os.path.exists(folder_name):
-    os.makedirs(folder_name)
-
-# Save the plot in the specified folder
-file_path = os.path.join(folder_name, "DAT_EWL_SANDY1992.csv")
-
-# Define the filename to save the data
+# Prepare additional output directory
+if not os.path.exists('Sandy'):
+    os.makedirs('Sandy', exist_ok=True)
 filename = "Sandy/DAT_EWL_SANDY1992.csv"
 
-# Run the loop again
 for model_file, lookback, prefix in zip(model_files, lookbacks, prefixes):
-    X_test_rnn, y_test_rnn = create_rnn_dataset(X_norm, y_scaled, lookback)
-    X_test_rnn = X_test_rnn.transpose(0, 2, 1)
+    X_test, y_test = create_rnn_dataset(X_norm, y_scaled, lookback)
+    X_test = X_test.transpose(0, 2, 1)
 
-    # Load the model
     model = load_model(model_file, custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
+    rmse, kge_v, nse_v, d_v, amb_v = evaluate_and_plot(model, X_test, y_test, scaler_y, prefix)
 
-    # Evaluate and plot
-    amb_value, rmse, kge_value, nse_value, d = evaluate_and_plot(model, X_test_rnn, y_test_rnn, scaler_y, prefix)
+    test_pred_orig = scaler_y.inverse_transform(model.predict(X_test))
+    y_test_orig  = scaler_y.inverse_transform(y_test)
+    extract_and_save_all(test_pred_orig, y_test_orig, lookback, DateTime, prefix, filename)
 
-    # Extract and save all data using the updated function
-    test_predictions_original = scaler_y.inverse_transform(model.predict(X_test_rnn))
-    y_test_original = scaler_y.inverse_transform(y_test_rnn)
-    DAT_EWL_SANDY1992 = extract_and_save_all(test_predictions_original, y_test_original, lookback, DateTime, prefix, filename)
+print("Predictions completed!")
