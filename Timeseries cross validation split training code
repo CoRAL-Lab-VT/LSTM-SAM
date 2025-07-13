@@ -104,7 +104,7 @@ class CustomAttentionLayer(tf.keras.layers.Layer):
         scores     = K.squeeze( K.tanh( K.dot(x, self.W) + self.b ), axis=-1 )
         attention  = K.softmax( scores, axis=1 )                     # (batch, time)
 
-        # 2) pick top 10% timesteps per sequence
+        # 2) Identify the top 10% of the attention score 
         k_val      = tf.maximum(1, tf.cast(tf.cast(tf.shape(attention)[1], tf.float32)*0.1, tf.int32))
         topk_inds  = tf.math.top_k(attention, k=k_val).indices        # (batch, k)
         mask       = tf.reduce_sum(tf.one_hot(topk_inds, depth=tf.shape(attention)[1]), axis=1)  # (batch, time)
