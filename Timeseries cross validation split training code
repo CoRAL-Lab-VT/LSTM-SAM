@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from scipy.stats import pearsonr, linregress
 
 # Load the sequence data from CSV
-data = pd.read_csv('DAUAL1981-2022.csv', header=0, parse_dates=[0])
+data = pd.read_csv('ATLNJ1981-2022.csv', header=0, parse_dates=[0])
 
 # Extract 'Date' and 'Time (GMT)' columns from the dataframe
 DateTime = data[['Date', 'Time (GMT)']]
@@ -96,24 +96,37 @@ class CustomAttentionLayer(tf.keras.layers.Layer):
         super(CustomAttentionLayer, self).build(input_shape)
 
     def call(self, x):
-        e = K.tanh(K.dot(x, self.W) + self.b)
-        # Compute attention scores
-        a = K.softmax(e, axis=1)
+        # ensure x is 3-D: (batch, time, features)
+        if K.ndim(x) == 2:
+            x = K.expand_dims(x, axis=1)
 
-        # Identify the top 10% of the attention score (which corresponds to the sequences of extreme WL)
-        k_value = tf.cast(tf.cast(tf.shape(a)[1], tf.float32) * 0.1, tf.int32)
-        top_10_percent_idx = tf.math.top_k(a, k=tf.math.maximum(1, k_value))[1]
-        mask = tf.reduce_any(tf.equal(tf.range(tf.shape(a)[1])[None, :], top_10_percent_idx[:, :, None]), axis=1)
+        # 1) raw scores and squeeze off the last dim → (batch, time)
+        scores     = K.squeeze( K.tanh( K.dot(x, self.W) + self.b ), axis=-1 )
+        attention  = K.softmax( scores, axis=1 )                     # (batch, time)
 
-        # Apply emphasis
-        emphasized_a = tf.where(mask, a * self.emphasis_factor, a)
-        output = x * emphasized_a
+        # 2) pick top 10% timesteps per sequence
+        k_val      = tf.maximum(1, tf.cast(tf.cast(tf.shape(attention)[1], tf.float32)*0.1, tf.int32))
+        topk_inds  = tf.math.top_k(attention, k=k_val).indices        # (batch, k)
+        mask       = tf.reduce_sum(tf.one_hot(topk_inds, depth=tf.shape(attention)[1]), axis=1)  # (batch, time)
 
-        summed_output = K.sum(output, axis=1, keepdims=True)
-        return summed_output
+        # 3) apply emphasis, then renormalize
+        emphasized = attention + mask * (self.emphasis_factor - 1.0) * attention
+        emphasized = emphasized / (K.sum(emphasized, axis=1, keepdims=True) + K.epsilon())
+
+        # 4) expand back to (batch, time, 1) and weight x
+        emphasized = K.expand_dims(emphasized, axis=-1)              # (batch, time, 1)
+        weighted   = x * emphasized                                   # (batch, time, features)
+
+        # 5) sum over time → (batch, features)
+        return K.sum(weighted, axis=1)
 
     def compute_output_shape(self, input_shape):
-        return input_shape[0], input_shape[-1]
+        # input_shape may be (batch, features) or (batch, time, features)
+        if len(input_shape) == 2:
+            batch, features = input_shape
+        else:
+            batch, _, features = input_shape
+        return (batch, features)
 
 #Build model
 class LSTMHyperModel(HyperModel):
@@ -137,7 +150,7 @@ class LSTMHyperModel(HyperModel):
         model.add(Dropout(hp.Float("dropout_2", min_value=0.1, max_value=0.5, step=0.1)))
         model.add(Bidirectional(LSTM(units=hp.Int("units_3", min_value=32, max_value=512, step=32),
                                       activation='tanh',
-                                      return_sequences=False,
+                                      return_sequences=True,
                                       kernel_regularizer=l2(hp.Float("l2_3", min_value=1e-6, max_value=1e-3, sampling="log")))))
         model.add(BatchNormalization())
         model.add(Dropout(hp.Float("dropout_3", min_value=0.1, max_value=0.5, step=0.1)))
@@ -152,7 +165,7 @@ class LSTMHyperModel(HyperModel):
 tuner = BayesianOptimization(
     LSTMHyperModel(input_shape=(num_input_features, lookback)),
     objective="val_loss",
-    max_trials=300,  # Adjust the number of trials as needed
+    max_trials=50,  # Adjust the number of trials as needed
     seed=42,
     project_name="Trials"
 )
@@ -196,7 +209,7 @@ The optimal emphasis factor for the attention layer is {best_hps.get('emphasis_f
 ax.text(0.5, 5, text, fontsize=12, ha='center')
 
 # show the plot
-plt.savefig("DP128b24hMAE.png", bbox_inches='tight', dpi=300)
+plt.savefig("AC128b24hMAE.png", bbox_inches='tight', dpi=300)
 plt.show()
 
 # Time Series Cross-Validation for Model Evaluation
@@ -229,8 +242,8 @@ best_model = tuner.hypermodel.build(best_hps)
 history = best_model.fit(X_train_rnn, y_train_rnn, epochs=500, batch_size=128, callbacks=[early_stopping], validation_split=0.2)
 
 # Save the final model
-best_model.save("DP128b24hMAECV.h5")
-loaded_model = tf.keras.models.load_model("DP128b24hMAECV.h5", custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
+best_model.save("AC128b24hMAECV.h5")
+loaded_model = tf.keras.models.load_model("AC128b24hMAECV.h5", custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
 
 # Make predictions on the testing data
 test_predictions = loaded_model.predict(X_test_rnn)
@@ -243,7 +256,7 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss (m)')
 plt.title('Training and Validation Loss Over Time')
 plt.legend()
-plt.savefig("DP128b24hMAEtrainnvalidloss.png", bbox_inches='tight', dpi=300)
+plt.savefig("AC128b24hMAEtrainnvalidloss.png", bbox_inches='tight', dpi=300)
 plt.show()
 
 # Reverse the scaling of the predictions
@@ -267,7 +280,7 @@ plt.xlabel('Time (h)')
 plt.ylabel('Water Level (m)')
 plt.title('Actual and Predicted Water Levels')
 plt.legend()
-plt.savefig("DP128b24hMAE.png", bbox_inches='tight', dpi=300)
+plt.savefig("AC128b24hMAE.png", bbox_inches='tight', dpi=300)
 plt.show()
 
 # Assuming the 'DateTime' DataFrame has the same length as 'y_original' and 'test_predictions_original'
@@ -284,8 +297,8 @@ data_full = pd.DataFrame({
 print(data_full)
         
 # Save the DataFrame as a CSV file
-data_full.to_csv('DP128b24hMAE.csv', index=False)     
-print("DP128b24hMAE.csv")
+data_full.to_csv('AC128b24hMAE.csv', index=False)     
+print("AC128b24hMAE.csv")
 
 # Extract the original data and test predictions from data_full
 orig_data = data_full['Original Data'].to_numpy()
@@ -321,7 +334,7 @@ plt.plot(test_predictions_full, marker='o', linestyle='', label="Test Prediction
 plt.xlabel("Time")
 plt.ylabel("Water Level")
 plt.legend()
-plt.savefig("DP128b24hMAE.png", bbox_inches='tight', dpi=300)
+plt.savefig("AC128b24hMAE.png", bbox_inches='tight', dpi=300)
 plt.show()
 
 # Extract the original data and test predictions from data_full
@@ -347,5 +360,5 @@ max_value = max(max(orig_data), max(test_predictions_full))
 plt.plot([min_value, max_value], [min_value, max_value], 'r--')
 
 plt.legend()
-plt.savefig("DP128b24hMAEorigvspred.png", bbox_inches='tight', dpi=300)
+plt.savefig("AC128b24hMAEorigvspred.png", bbox_inches='tight', dpi=300)
 plt.show()
