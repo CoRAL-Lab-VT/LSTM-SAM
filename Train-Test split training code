@@ -26,6 +26,8 @@ from tensorflow.keras.layers import Dense, LSTM, Dropout
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.feature_selection import mutual_info_regression
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from tensorflow.keras.losses import MeanAbsoluteError
+from tensorflow.keras.metrics import MeanSquaredError
 
 # Load the sequence data from CSV
 data = pd.read_csv('ATLNJ1981-2022.csv', header=0, parse_dates=[0])
@@ -197,7 +199,7 @@ class LSTMHyperModel(HyperModel):
         model.add(CustomAttentionLayer(emphasis_factor=hp.Float('emphasis_factor', min_value=1.0, max_value=2.0, step=0.1)))    # Add attention layer here
          
         model.add(Dense(num_output_features))
-        model.compile(loss="mae", optimizer=Adam(hp.Float("learning_rate", min_value=1e-4, max_value=1e-2, sampling="log")), metrics=["mae"])
+        model.compile(loss=MeanAbsoluteError(), optimizer=Adam(hp.Float("learning_rate", min_value=1e-4, max_value=1e-2, sampling="log")), metrics=[MeanSquaredError()])
         return model
 
 # Set up the hypermodel
@@ -207,7 +209,7 @@ hypermodel = LSTMHyperModel(input_shape=(num_input_features, lookback))
 tuner = BayesianOptimization(
     hypermodel,
     objective="val_loss",
-    max_trials=200,  # Increase the number of trials
+    max_trials=60,  # Increase the number of trials
     seed=42,
     project_name="Trials"
 )
@@ -247,7 +249,7 @@ The optimal emphasis factor for the attention layer is {best_hps.get('emphasis_f
 ax.text(0.5, 5, text, fontsize=12, ha='center')
 
 # show the plot
-plt.savefig("AC128b24hMAE.png", bbox_inches='tight', dpi=300)
+plt.savefig("CB128b24hMAE.png", bbox_inches='tight', dpi=300)
 plt.show()
 
 # Build the model with the optimal hyperparameters
@@ -257,7 +259,7 @@ best_model = tuner.hypermodel.build(best_hps)
 history = best_model.fit(X_train_rnn, y_train_rnn, epochs=500, batch_size=128, verbose=1, callbacks=[early_stopping], validation_split=0.3)
 
 # Save the model
-best_model.save("AC128b24hMAETT.h5")
+best_model.save("CB128b24hMAETT.keras")
 
 # Evaluate the best model
 best_model.evaluate(X_test_rnn, y_test_rnn, verbose=1)
@@ -265,7 +267,7 @@ best_model.evaluate(X_test_rnn, y_test_rnn, verbose=1)
 from tensorflow.keras.models import load_model
 
 # Load the model
-loaded_model = load_model("AC128b24hMAETT.h5", custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
+loaded_model = load_model("CB128b24hMAETT.keras", custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
 
 # Make predictions on the testing data
 test_predictions = loaded_model.predict(X_test_rnn)
@@ -278,7 +280,7 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss (m)')
 plt.title('Training and Validation Loss Over Time')
 plt.legend()
-plt.savefig("AC128b24hMAEtrainnvalidloss.png", bbox_inches='tight', dpi=300)
+plt.savefig("CB128b24hMAEtrainnvalidloss.png", bbox_inches='tight', dpi=300)
 plt.show()
 
 # Reverse the scaling of the predictions
@@ -302,7 +304,7 @@ plt.xlabel('Time (h)')
 plt.ylabel('Water Level (m)')
 plt.title('Actual and Predicted Water Levels')
 plt.legend()
-plt.savefig("AC128b24hMAE.png", bbox_inches='tight', dpi=300)
+plt.savefig("CB128b24hMAE.png", bbox_inches='tight', dpi=300)
 plt.show()
 
 # Assuming the 'DateTime' DataFrame has the same length as 'y_original' and 'test_predictions_original'
@@ -319,9 +321,9 @@ data_full = pd.DataFrame({
 print(data_full)
         
 # Save the DataFrame as a CSV file
-data_full.to_csv('AC128b24hMAE.csv', index=False)
+data_full.to_csv('CB128b24hMAE.csv', index=False)
         
-print("AC128b24hMAE.csv")
+print("CB128b24hMAE.csv")
 
 # Extract the original data and test predictions from data_full
 orig_data = data_full['Original Data'].to_numpy()
@@ -357,7 +359,7 @@ plt.plot(test_predictions_full, marker='o', linestyle='', label="Test Prediction
 plt.xlabel("Time")
 plt.ylabel("Water Level")
 plt.legend()
-plt.savefig("AC128b24hMAE.png", bbox_inches='tight', dpi=300)
+plt.savefig("CB128b24hMAE.png", bbox_inches='tight', dpi=300)
 plt.show()
 
 # Extract the original data and test predictions from data_full
@@ -382,5 +384,5 @@ plt.plot([min_value, max_value], [min_value, max_value], 'r--')
 plt.xlabel("Original Data")
 plt.ylabel("Test Predictions")
 plt.legend(fontsize=14)
-plt.savefig("AC128b24hMAEorigvspred.png", bbox_inches='tight', dpi=300)
+plt.savefig("CB128b24hMAEorigvspred.png", bbox_inches='tight', dpi=300)
 plt.show()
