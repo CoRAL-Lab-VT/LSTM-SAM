@@ -165,7 +165,7 @@ class LSTMHyperModel(HyperModel):
 tuner = BayesianOptimization(
     LSTMHyperModel(input_shape=(num_input_features, lookback)),
     objective="val_loss",
-    max_trials=50,  # Adjust the number of trials as needed
+    max_trials=200,  # Adjust the number of trials as needed
     seed=42,
     project_name="Trials"
 )
