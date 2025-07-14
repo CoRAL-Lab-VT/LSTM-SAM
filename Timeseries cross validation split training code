@@ -243,8 +243,8 @@ best_model = tuner.hypermodel.build(best_hps)
 history = best_model.fit(X_train_rnn, y_train_rnn, epochs=500, batch_size=128, callbacks=[early_stopping], validation_split=0.2)
 
 # Save the final model
-best_model.save("AC128b24hMAECV.keras")
-loaded_model = tf.keras.models.load_model("AC128b24hMAECV.keras", custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
+best_model.save("AC128b24hMAECV.h5")
+loaded_model = tf.keras.models.load_model("AC128b24hMAECV.h5", custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
 
 # Make predictions on the testing data
 test_predictions = loaded_model.predict(X_test_rnn)
