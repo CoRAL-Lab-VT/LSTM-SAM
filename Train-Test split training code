@@ -259,7 +259,7 @@ best_model = tuner.hypermodel.build(best_hps)
 history = best_model.fit(X_train_rnn, y_train_rnn, epochs=500, batch_size=128, verbose=1, callbacks=[early_stopping], validation_split=0.3)
 
 # Save the model
-best_model.save("CB128b24hMAETT.keras")
+best_model.save("CB128b24hMAETT.h5")
 
 # Evaluate the best model
 best_model.evaluate(X_test_rnn, y_test_rnn, verbose=1)
@@ -267,7 +267,7 @@ best_model.evaluate(X_test_rnn, y_test_rnn, verbose=1)
 from tensorflow.keras.models import load_model
 
 # Load the model
-loaded_model = load_model("CB128b24hMAETT.keras", custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
+loaded_model = load_model("CB128b24hMAETT.h5", custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
 
 # Make predictions on the testing data
 test_predictions = loaded_model.predict(X_test_rnn)
