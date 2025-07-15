@@ -35,7 +35,7 @@ data = data.drop(columns=['Date', 'Time (GMT)'])
 print("Target station data imported! Loading LSTM-SAM models...")
 
 # Output directory
-location = "Results"
+location = "Visualization"
 os.makedirs(location, exist_ok=True)
 
 # Preprocess Data
@@ -59,6 +59,9 @@ def create_rnn_dataset(X_norm, y_scaled, lookback):
         ys.append(y_scaled[i + lookback])
     return np.array(Xs), np.array(ys)
 
+import tensorflow as tf
+from tensorflow.keras import backend as K
+
 class CustomAttentionLayer(tf.keras.layers.Layer):
     def __init__(self, emphasis_factor=1.5, **kwargs):
         self.emphasis_factor = emphasis_factor
@@ -70,30 +73,56 @@ class CustomAttentionLayer(tf.keras.layers.Layer):
         return config
 
     def build(self, input_shape):
-        self.W = self.add_weight(name='att_weight',
-                                 shape=(input_shape[-1], 1),
-                                 initializer='glorot_uniform',
-                                 trainable=True)
-        self.b = self.add_weight(shape=(1,),
-                                 initializer='zeros',
-                                 trainable=True,
-                                 name='bias')
+        self.W = self.add_weight(
+            name='att_weight',
+            shape=(input_shape[-1], 1),
+            initializer='glorot_uniform',
+            trainable=True
+        )
+        self.b = self.add_weight(
+            name='bias',
+            shape=(1,),
+            initializer='zeros',
+            trainable=True
+        )
         super().build(input_shape)
 
     def call(self, x):
-        e = K.tanh(K.dot(x, self.W) + self.b)
-        a = K.softmax(e, axis=1)
-        k_value = tf.cast(tf.cast(tf.shape(a)[1], tf.float32) * 0.1, tf.int32)
-        top_idx = tf.math.top_k(a, k=tf.math.maximum(1, k_value))[1]
-        mask = tf.reduce_any(
-            tf.equal(tf.range(tf.shape(a)[1])[None, :], top_idx[:, :, None]), axis=1
+        # x: (batch, T, features)
+        e = K.tanh(K.dot(x, self.W) + self.b)        # (batch, T, 1)
+        a = K.softmax(e, axis=1)                     # (batch, T, 1)
+
+        # Squeeze out the features‐singleton so we have (batch, T)
+        a_flat = tf.squeeze(a, axis=-1)              # (batch, T)
+
+        # Compute how many to pick: top 10% of T, at least 1
+        T = tf.shape(a_flat)[1]
+        k = tf.maximum(1, tf.cast(tf.cast(T, tf.float32) * 0.1, tf.int32))
+
+        # Now pick top-k over *time* (axis=-1 here means the last axis of a_flat)
+        top_vals, top_idx = tf.nn.top_k(a_flat, k)   # both (batch, k)
+
+        # Build a (batch, T) mask where True for any time-step in top_idx
+        # First expand dims so we can compare
+        top_idx_exp = tf.expand_dims(top_idx, axis=2)        # (batch, k, 1)
+        range_row   = tf.reshape(tf.range(T), (1, 1, T))     # (1, k=1, T)
+        mask_flat   = tf.reduce_any(
+            tf.equal(top_idx_exp, range_row), axis=1          # (batch, T)
         )
-        emphasized = tf.where(mask, a * self.emphasis_factor, a)
-        output = x * emphasized
-        return K.sum(output, axis=1, keepdims=True)
+
+        # Re-expand to (batch, T, 1) to match a’s shape
+        mask = tf.expand_dims(mask_flat, axis=-1)             # (batch, T, 1)
+
+        # Emphasize only those top-10% time-steps
+        a_emph = tf.where(mask, a * self.emphasis_factor, a)  # (batch, T, 1)
+
+        # Final weighted sum over time
+        output = tf.reduce_sum(x * a_emph, axis=1, keepdims=True)  # (batch, 1, features)
+        return output
 
     def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[-1])
+        return (input_shape[0], 1, input_shape[-1])
+
 
 def kge(y_true, y_pred):
     r, _ = pearsonr(y_true, y_pred)
@@ -115,7 +144,7 @@ def willmott_skill(y_true, y_pred):
     den = np.sum((np.abs(y_pred - obs_mean) + np.abs(y_true - obs_mean))**2)
     return 1 - num/den
 
-def evaluate_and_plot(model, X_test_rnn, y_test_rnn, scaler_y, filename_prefix):
+def evaluate_and_plot(model, X_test_rnn, y_test_rnn, dates, scaler_y, filename_prefix):
     # Evaluate and predict
     _ = model.evaluate(X_test_rnn, y_test_rnn, verbose=1)
     preds = model.predict(X_test_rnn)
@@ -124,12 +153,23 @@ def evaluate_and_plot(model, X_test_rnn, y_test_rnn, scaler_y, filename_prefix):
     y_true = scaler_y.inverse_transform(y_test_rnn)
     y_pred = scaler_y.inverse_transform(preds)
 
-    # Metrics
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    kge_v = kge(y_true.flatten(), y_pred.flatten())
-    nse_v = nse(y_true.flatten(), y_pred.flatten())
-    d_v = willmott_skill(y_true.flatten(), y_pred.flatten())
-    amb_v = amb(y_true.flatten(), y_pred.flatten())
+    # By default, use all data
+    y_test_filtered = y_true
+    test_predictions_filtered = y_pred
+
+    # To limit the plots to Dec 8–14, 1992, uncomment below:
+    start_date = pd.to_datetime('1992-12-08')
+    end_date   = pd.to_datetime('1992-12-14')
+    mask = (dates >= start_date) & (dates <= end_date)
+    y_test_filtered = y_true[mask.values]
+    test_predictions_filtered = y_pred[mask.values]
+
+    # Compute metrics on the filtered subset
+    rmse = np.sqrt(mean_squared_error(y_test_filtered, test_predictions_filtered))
+    kge_v = kge(y_test_filtered.flatten(), test_predictions_filtered.flatten())
+    nse_v = nse(y_test_filtered.flatten(), test_predictions_filtered.flatten())
+    d_v = willmott_skill(y_test_filtered.flatten(), test_predictions_filtered.flatten())
+    amb_v = amb(y_test_filtered.flatten(), test_predictions_filtered.flatten())
 
     metrics_text = [
         f'RMSE: {rmse:.4f}', f'KGE: {kge_v:.4f}',
@@ -141,8 +181,8 @@ def evaluate_and_plot(model, X_test_rnn, y_test_rnn, scaler_y, filename_prefix):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
     # Time series plot (no legend)
-    ax1.plot(y_true, 'r--', label='Actual')
-    ax1.plot(y_pred, label='Predicted')
+    ax1.plot(y_test_filtered, 'r--', label='Actual')
+    ax1.plot(test_predictions_filtered, label='Predicted')
     for text in metrics_text:
         ax1.plot([], [], ' ', label=text)
     ax1.set_xlabel('Time (h)')
@@ -150,10 +190,11 @@ def evaluate_and_plot(model, X_test_rnn, y_test_rnn, scaler_y, filename_prefix):
     ax1.set_title(f'Sandy hook, NJ ({filename_prefix})')
 
     # One-to-one scatter with legend
-    mn, mx = min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())
+    mn, mx = min(y_test_filtered.min(), test_predictions_filtered.min()), \
+             max(y_test_filtered.max(), test_predictions_filtered.max())
     ax2.plot([mn, mx], [mn, mx], 'k--', label='1:1 line')
-    ax2.scatter(y_true, y_pred, alpha=0.7, label='Predicted')
-    ax2.scatter(y_true, y_true, s=5, label='Actual')
+    ax2.scatter(y_test_filtered, test_predictions_filtered, alpha=0.7, label='Predicted')
+    ax2.scatter(y_test_filtered, y_test_filtered, s=5, label='Actual')
     for text in metrics_text:
         ax2.plot([], [], ' ', label=text)
     ax2.set_xlabel('Actual (m)')
@@ -178,7 +219,6 @@ def extract_prefix_from_filename(filename):
     return filename.split(".h5")[0]
 
 def extract_and_save_all(test_pred, y_true, lookback, DateTime, prefix, filename):
-    # Ensure parent directory exists
     dirpath = os.path.dirname(filename)
     if dirpath:
         os.makedirs(dirpath, exist_ok=True)
@@ -190,7 +230,6 @@ def extract_and_save_all(test_pred, y_true, lookback, DateTime, prefix, filename
         pred_col: test_pred.flatten()[indices]
     })
 
-    # adjust for lookback
     idx_adj = indices + lookback
     df['Date'] = DateTime['Date'].iloc[idx_adj].values
     df['Time (GMT)'] = DateTime['Time (GMT)'].iloc[idx_adj].values
@@ -212,27 +251,30 @@ def extract_and_save_all(test_pred, y_true, lookback, DateTime, prefix, filename
     return df
 
 # Main loop: load each model, evaluate, plot, and save results
-all_files = os.listdir()
+all_files   = os.listdir()
 model_files = [f for f in all_files if f.endswith(".h5")]
-lookbacks = [extract_lookback_from_filename(f) for f in model_files]
-prefixes = [extract_prefix_from_filename(f) for f in model_files]
+lookbacks   = [extract_lookback_from_filename(f) for f in model_files]
+prefixes    = [extract_prefix_from_filename(f) for f in model_files]
 
 print("Starting predictions...")
 
 # Prepare additional output directory
-if not os.path.exists('Sandy'):
-    os.makedirs('Sandy', exist_ok=True)
-filename = "Sandy/DAT_EWL_SANDY1992.csv"
+os.makedirs('LSTM-SAM predictions', exist_ok=True)
+filename = "LSTM-SAM predictions/DAT_EWL_SANDY1992.csv"
 
 for model_file, lookback, prefix in zip(model_files, lookbacks, prefixes):
     X_test, y_test = create_rnn_dataset(X_norm, y_scaled, lookback)
-    X_test = X_test.transpose(0, 2, 1)
+
+    # build dates series for filtering
+    dates_test = DateTime['Date'].iloc[lookback:].reset_index(drop=True)
 
     model = load_model(model_file, custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
-    rmse, kge_v, nse_v, d_v, amb_v = evaluate_and_plot(model, X_test, y_test, scaler_y, prefix)
+    rmse, kge_v, nse_v, d_v, amb_v = evaluate_and_plot(
+        model, X_test, y_test, dates_test, scaler_y, prefix
+    )
 
     test_pred_orig = scaler_y.inverse_transform(model.predict(X_test))
-    y_test_orig  = scaler_y.inverse_transform(y_test)
+    y_test_orig   = scaler_y.inverse_transform(y_test)
     extract_and_save_all(test_pred_orig, y_test_orig, lookback, DateTime, prefix, filename)
 
 print("Predictions completed!")
