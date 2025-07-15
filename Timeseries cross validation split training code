@@ -71,76 +71,79 @@ def create_rnn_dataset(X, y, lookback):
 # Create RNN datasets for training and testing
 X_train_rnn, y_train_rnn = create_rnn_dataset(X_train, y_train, lookback)
 X_test_rnn, y_test_rnn = create_rnn_dataset(X_test, y_test, lookback)
-X_train_rnn = X_train_rnn.transpose(0, 2, 1)
-X_test_rnn = X_test_rnn.transpose(0, 2, 1)
+
 
 # Custom Attention Layer
 class CustomAttentionLayer(tf.keras.layers.Layer):
     def __init__(self, emphasis_factor=1.5, **kwargs):
         self.emphasis_factor = emphasis_factor
-        super(CustomAttentionLayer, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def get_config(self):
-        config = super(CustomAttentionLayer, self).get_config()
+        config = super().get_config()
         config.update({"emphasis_factor": self.emphasis_factor})
         return config
 
     def build(self, input_shape):
-        self.W = self.add_weight(name='att_weight',
-                                 shape=(input_shape[-1], 1),
-                                 initializer='glorot_uniform',
-                                 trainable=True)
-        self.b = self.add_weight(shape=(1,),
-                                 initializer='zeros',
-                                 trainable=True,
-                                 name='bias')
-        super(CustomAttentionLayer, self).build(input_shape)
+        self.W = self.add_weight(
+            name='att_weight',
+            shape=(input_shape[-1], 1),
+            initializer='glorot_uniform',
+            trainable=True
+        )
+        self.b = self.add_weight(
+            name='bias',
+            shape=(1,),
+            initializer='zeros',
+            trainable=True
+        )
+        super().build(input_shape)
 
     def call(self, x):
-        # ensure x is 3-D: (batch, time, features)
-        if K.ndim(x) == 2:
-            x = K.expand_dims(x, axis=1)
+        # x: (batch, T, features)
+        e = K.tanh(K.dot(x, self.W) + self.b)       
+        a = K.softmax(e, axis=1)                    
 
-        # 1) raw scores and squeeze off the last dim → (batch, time)
-        scores     = K.squeeze( K.tanh( K.dot(x, self.W) + self.b ), axis=-1 )
-        attention  = K.softmax( scores, axis=1 )                     # (batch, time)
+        # Squeeze out the features‐singleton so we have 
+        a_flat = tf.squeeze(a, axis=-1)             
 
-        # 2) pick top 10% timesteps per sequence
-        k_val      = tf.maximum(1, tf.cast(tf.cast(tf.shape(attention)[1], tf.float32)*0.1, tf.int32))
-        topk_inds  = tf.math.top_k(attention, k=k_val).indices        # (batch, k)
-        mask       = tf.reduce_sum(tf.one_hot(topk_inds, depth=tf.shape(attention)[1]), axis=1)  # (batch, time)
+        # Compute the top 10% of T
+        T = tf.shape(a_flat)[1]
+        k = tf.maximum(1, tf.cast(tf.cast(T, tf.float32) * 0.1, tf.int32))
 
-        # 3) apply emphasis, then renormalize
-        emphasized = attention + mask * (self.emphasis_factor - 1.0) * attention
-        emphasized = emphasized / (K.sum(emphasized, axis=1, keepdims=True) + K.epsilon())
+        # Now pick top-k over *time* (axis=-1 here means the last axis of a_flat)
+        top_vals, top_idx = tf.nn.top_k(a_flat, k)   # both (batch, k)
 
-        # 4) expand back to (batch, time, 1) and weight x
-        emphasized = K.expand_dims(emphasized, axis=-1)              # (batch, time, 1)
-        weighted   = x * emphasized                                   # (batch, time, features)
+        # Build a (batch, T) mask where True for any time-step in top_idx
+        top_idx_exp = tf.expand_dims(top_idx, axis=2)        
+        range_row   = tf.reshape(tf.range(T), (1, 1, T))     
+        mask_flat   = tf.reduce_any(
+            tf.equal(top_idx_exp, range_row), axis=1          
+        )
 
-        # 5) sum over time → (batch, features)
-        return K.sum(weighted, axis=1)
+        # Re-expand to (batch, T, 1) to match a’s shape
+        mask = tf.expand_dims(mask_flat, axis=-1)            
+
+        # Emphasize only those top-10% time-steps
+        a_emph = tf.where(mask, a * self.emphasis_factor, a) 
+
+        # Final weighted sum over time
+        output = tf.reduce_sum(x * a_emph, axis=1, keepdims=True) 
+        return output
 
     def compute_output_shape(self, input_shape):
-        # input_shape may be (batch, features) or (batch, time, features)
-        if len(input_shape) == 2:
-            batch, features = input_shape
-        else:
-            batch, _, features = input_shape
-        return (batch, features)
+        return (input_shape[0], 1, input_shape[-1])
 
-#Build model
 class LSTMHyperModel(HyperModel):
-    def __init__(self, input_shape):
-        self.input_shape = input_shape
-
+    def __init__(self, lookback, n_features):
+        # now each sample is (lookback, n_features)
+        self.input_shape = (lookback, n_features)
     def build(self, hp):
         model = Sequential()
         model.add(Bidirectional(LSTM(units=hp.Int("units_1", min_value=32, max_value=512, step=32),
-                                      input_shape=self.input_shape,
                                       activation='tanh',
                                       return_sequences=True,
-                                      kernel_regularizer=l2(hp.Float("l2_1", min_value=1e-6, max_value=1e-3, sampling="log")))))
+                                      kernel_regularizer=l2(hp.Float("l2_1", min_value=1e-6, max_value=1e-3, sampling="log")), input_shape=self.input_shape)))
         model.add(BatchNormalization())
         model.add(Dropout(hp.Float("dropout_1", min_value=0.1, max_value=0.5, step=0.1)))
         model.add(Bidirectional(LSTM(units=hp.Int("units_2", min_value=32, max_value=512, step=32),
@@ -157,14 +160,17 @@ class LSTMHyperModel(HyperModel):
         model.add(Dropout(hp.Float("dropout_3", min_value=0.1, max_value=0.5, step=0.1)))
         
         model.add(CustomAttentionLayer(emphasis_factor=hp.Float('emphasis_factor', min_value=1.0, max_value=2.0, step=0.1)))    # Add attention layer here
-         
+
+        # Attention outputs (batch, 1, features)—flatten before Dense
+        model.add(tf.keras.layers.Flatten())
+        
         model.add(Dense(num_output_features))
         model.compile(loss=MeanAbsoluteError(), optimizer=Adam(hp.Float("learning_rate", min_value=1e-4, max_value=1e-2, sampling="log")), metrics=[MeanSquaredError()])
         return model
 
 # Bayesian Optimization setup
 tuner = BayesianOptimization(
-    LSTMHyperModel(input_shape=(num_input_features, lookback)),
+    hypermodel = LSTMHyperModel(lookback=lookback, n_features=num_input_features),
     objective="val_loss",
     max_trials=50,  # Adjust the number of trials as needed
     seed=42,
@@ -175,8 +181,6 @@ tuner = BayesianOptimization(
 early_stopping = EarlyStopping(monitor='val_loss', patience=5, verbose=1, mode='min')
 
 # Perform Bayesian Optimization on the training data
-X_train_rnn, y_train_rnn = create_rnn_dataset(X_train, y_train, lookback)
-X_train_rnn = X_train_rnn.transpose(0, 2, 1)
 tuner.search(X_train_rnn, y_train_rnn, epochs=500, batch_size=128, callbacks=[early_stopping], validation_split=0.3)
 
 # Get the best hyperparameters
@@ -193,11 +197,8 @@ import matplotlib.pyplot as plt
 
 # create a new figure
 fig, ax = plt.subplots()
-
-# set limits for x and y axis
 ax.set_xlim([0, 10])
 ax.set_ylim([0, 10])
-
 # text to display
 text = f"""
 The hyperparameter search is complete. The optimal number of units in the first, second, and third LSTM layers are {best_hps.get('units_1')}, {best_hps.get('units_2')}, and {best_hps.get('units_3')}, respectively.
@@ -205,11 +206,7 @@ The optimal dropout rates are {best_hps.get('dropout_1')}, {best_hps.get('dropou
 The optimal learning rate is {best_hps.get('learning_rate')}.
 The optimal emphasis factor for the attention layer is {best_hps.get('emphasis_factor')}.
 """
-
-# display the text on the plot
 ax.text(0.5, 5, text, fontsize=12, ha='center')
-
-# show the plot
 plt.savefig("AC128b24hMAE.png", bbox_inches='tight', dpi=300)
 plt.show()
 
@@ -223,8 +220,6 @@ for train_index, val_index in tscv.split(X_train):
 
     X_train_fold_rnn, y_train_fold_rnn = create_rnn_dataset(X_train_fold, y_train_fold, lookback)
     X_val_fold_rnn, y_val_fold_rnn = create_rnn_dataset(X_val_fold, y_val_fold, lookback)
-    X_train_fold_rnn = X_train_fold_rnn.transpose(0, 2, 1)
-    X_val_fold_rnn = X_val_fold_rnn.transpose(0, 2, 1)
 
     # Build and train the model using the best hyperparameters
     model = tuner.hypermodel.build(best_hps)
