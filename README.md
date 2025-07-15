@@ -1,6 +1,15 @@
 # LSTM-SAM
 
-
+## Requirements
+To run this project, you will need the following dependencies and tools: 
+ 
+- TensorFlow 2.x 
+- Keras-tuner
+- NumPy 
+- Pandas 
+- Matplotlib 
+- Scikit-learn
+- Scipy 
 
 ## Contact
 For questions or issues, please open an issue on GitHub or contact:
