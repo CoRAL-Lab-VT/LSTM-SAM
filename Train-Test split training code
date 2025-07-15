@@ -1,4 +1,4 @@
-#import necessary libraries
+# Import the necessary libraries
 import math
 import numpy as np
 import pandas as pd
@@ -13,6 +13,7 @@ from scipy.stats import linregress
 from tensorflow.keras import layers
 from keras.layers import Activation
 from sklearn.datasets import load_iris
+from tensorflow.keras.models import load_model
 from tensorflow.keras import backend as K
 from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import MinMaxScaler
@@ -26,8 +27,6 @@ from tensorflow.keras.layers import Dense, LSTM, Dropout
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.feature_selection import mutual_info_regression
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from tensorflow.keras.losses import MeanAbsoluteError
-from tensorflow.keras.metrics import MeanSquaredError
 
 # Load the sequence data from CSV
 data = pd.read_csv('ATLNJ1981-2022.csv', header=0, parse_dates=[0])
@@ -43,16 +42,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 
-# Separate input and target variable
+# Load Fortmyers latest.csv dataset
 X = data.iloc[:, :-1]  # All columns except the last column (target variable)
 y = data.iloc[:, -1]  # The target variable
-
 
 def normalize_data(X):
     scaler = MinMaxScaler()
     X_norm = scaler.fit_transform(X)
     return X_norm, scaler
-
 
 # Step 1: Normalize the data using MinMaxScaler
 X_norm, scaler = normalize_data(X)
@@ -69,17 +66,15 @@ y_scaled = scaler_y.fit_transform(y_reshaped)
 # Inverse transform the scaled target variable back to the original scale
 y_original = scaler_y.inverse_transform(y_scaled)
 
-
 print(X_norm.shape)
 print(y_scaled.shape)
 
-
-#Training data has to be sequencial 
+#Training data has to be sequencial - first 3 weeks
 #Training data
 train_size = int(0.8 * len(X_norm))
 
 #Number of samples to lookback for each sample
-lookback= 24 
+lookback= 24
 
 
 # Define the number of input features
@@ -102,85 +97,85 @@ X_test = X_norm[train_size:]
 y_train = y_scaled[:train_size]
 y_test = y_scaled[train_size:]
 
-
 X_train_rnn, y_train_rnn = create_rnn_dataset(X_train, y_train, lookback)
 X_test_rnn, y_test_rnn = create_rnn_dataset(X_test, y_test, lookback)
-
-X_train_rnn = X_train_rnn.transpose(0, 2, 1)
-X_test_rnn = X_test_rnn.transpose(0, 2, 1)
 print(X_train_rnn.shape, X_test_rnn.shape)
-
 
 from keras.layers import Bidirectional, BatchNormalization
 from keras.regularizers import l2
 
-# Custom Attention Layer
 class CustomAttentionLayer(tf.keras.layers.Layer):
     def __init__(self, emphasis_factor=1.5, **kwargs):
         self.emphasis_factor = emphasis_factor
-        super(CustomAttentionLayer, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def get_config(self):
-        config = super(CustomAttentionLayer, self).get_config()
+        config = super().get_config()
         config.update({"emphasis_factor": self.emphasis_factor})
         return config
 
     def build(self, input_shape):
-        self.W = self.add_weight(name='att_weight',
-                                 shape=(input_shape[-1], 1),
-                                 initializer='glorot_uniform',
-                                 trainable=True)
-        self.b = self.add_weight(shape=(1,),
-                                 initializer='zeros',
-                                 trainable=True,
-                                 name='bias')
-        super(CustomAttentionLayer, self).build(input_shape)
+        self.W = self.add_weight(
+            name='att_weight',
+            shape=(input_shape[-1], 1),
+            initializer='glorot_uniform',
+            trainable=True
+        )
+        self.b = self.add_weight(
+            name='bias',
+            shape=(1,),
+            initializer='zeros',
+            trainable=True
+        )
+        super().build(input_shape)
 
     def call(self, x):
-        # ensure x is 3-D: (batch, time, features)
-        if K.ndim(x) == 2:
-            x = K.expand_dims(x, axis=1)
+        # x: (batch, T, features)
+        e = K.tanh(K.dot(x, self.W) + self.b)       
+        a = K.softmax(e, axis=1)                    
 
-        # 1) raw scores and squeeze off the last dim → (batch, time)
-        scores     = K.squeeze( K.tanh( K.dot(x, self.W) + self.b ), axis=-1 )
-        attention  = K.softmax( scores, axis=1 )                     # (batch, time)
+        # Squeeze out the features‐singleton so we have 
+        a_flat = tf.squeeze(a, axis=-1)             
 
-        # 2) pick top 10% timesteps per sequence
-        k_val      = tf.maximum(1, tf.cast(tf.cast(tf.shape(attention)[1], tf.float32)*0.1, tf.int32))
-        topk_inds  = tf.math.top_k(attention, k=k_val).indices        # (batch, k)
-        mask       = tf.reduce_sum(tf.one_hot(topk_inds, depth=tf.shape(attention)[1]), axis=1)  # (batch, time)
+        # Compute the top 10% of T
+        T = tf.shape(a_flat)[1]
+        k = tf.maximum(1, tf.cast(tf.cast(T, tf.float32) * 0.1, tf.int32))
 
-        # 3) apply emphasis, then renormalize
-        emphasized = attention + mask * (self.emphasis_factor - 1.0) * attention
-        emphasized = emphasized / (K.sum(emphasized, axis=1, keepdims=True) + K.epsilon())
+        # Now pick top-k over *time* (axis=-1 here means the last axis of a_flat)
+        top_vals, top_idx = tf.nn.top_k(a_flat, k)   # both (batch, k)
 
-        # 4) expand back to (batch, time, 1) and weight x
-        emphasized = K.expand_dims(emphasized, axis=-1)              # (batch, time, 1)
-        weighted   = x * emphasized                                   # (batch, time, features)
+        # Build a (batch, T) mask where True for any time-step in top_idx
+        # First expand dims so we can compare
+        top_idx_exp = tf.expand_dims(top_idx, axis=2)        
+        range_row   = tf.reshape(tf.range(T), (1, 1, T))     
+        mask_flat   = tf.reduce_any(
+            tf.equal(top_idx_exp, range_row), axis=1          
+        )
 
-        # 5) sum over time → (batch, features)
-        return K.sum(weighted, axis=1)
+        # Re-expand to (batch, T, 1) to match a’s shape
+        mask = tf.expand_dims(mask_flat, axis=-1)            
+
+        # Emphasize only those top-10% time-steps
+        a_emph = tf.where(mask, a * self.emphasis_factor, a) 
+
+        # Final weighted sum over time
+        output = tf.reduce_sum(x * a_emph, axis=1, keepdims=True) 
+        return output
 
     def compute_output_shape(self, input_shape):
-        # input_shape may be (batch, features) or (batch, time, features)
-        if len(input_shape) == 2:
-            batch, features = input_shape
-        else:
-            batch, _, features = input_shape
-        return (batch, features)
+        return (input_shape[0], 1, input_shape[-1])
 
-#Build the model
 class LSTMHyperModel(HyperModel):
-    def __init__(self, input_shape):
-        self.input_shape = input_shape
+    def __init__(self, lookback, n_features):
+        # now each sample is (lookback, n_features)
+        self.input_shape = (lookback, n_features)
 
     def build(self, hp):
         model = Sequential()
         model.add(Bidirectional(LSTM(units=hp.Int("units_1", min_value=32, max_value=512, step=32),
-                                      input_shape=self.input_shape,
                                       activation='tanh',
                                       return_sequences=True,
-                                      kernel_regularizer=l2(hp.Float("l2_1", min_value=1e-6, max_value=1e-3, sampling="log")))))
+                                      kernel_regularizer=l2(hp.Float("l2_1", min_value=1e-6, max_value=1e-3, sampling="log")), input_shape=self.input_shape)))
         model.add(BatchNormalization())
         model.add(Dropout(hp.Float("dropout_1", min_value=0.1, max_value=0.5, step=0.1)))
         model.add(Bidirectional(LSTM(units=hp.Int("units_2", min_value=32, max_value=512, step=32),
@@ -196,20 +191,23 @@ class LSTMHyperModel(HyperModel):
         model.add(BatchNormalization())
         model.add(Dropout(hp.Float("dropout_3", min_value=0.1, max_value=0.5, step=0.1)))
         
-        model.add(CustomAttentionLayer(emphasis_factor=hp.Float('emphasis_factor', min_value=1.0, max_value=2.0, step=0.1)))    # Add attention layer here
-         
+        model.add(CustomAttentionLayer(emphasis_factor=hp.Float('emphasis_factor', min_value=1.0, max_value=2.0, step=0.1)))  
+        
+        # Attention outputs (batch, 1, features)—flatten before Dense
+        model.add(tf.keras.layers.Flatten())
+        
         model.add(Dense(num_output_features))
-        model.compile(loss=MeanAbsoluteError(), optimizer=Adam(hp.Float("learning_rate", min_value=1e-4, max_value=1e-2, sampling="log")), metrics=[MeanSquaredError()])
+        model.compile(loss="mae", optimizer=Adam(hp.Float("learning_rate", min_value=1e-4, max_value=1e-2, sampling="log")), metrics=["mae"])
         return model
 
 # Set up the hypermodel
-hypermodel = LSTMHyperModel(input_shape=(num_input_features, lookback))
+hypermodel = LSTMHyperModel( lookback=lookback, n_features=num_input_features )
 
 # Set up the Keras tuner
 tuner = BayesianOptimization(
     hypermodel,
     objective="val_loss",
-    max_trials=60,  # Increase the number of trials
+    max_trials=300,  # Increase the number of trials
     seed=42,
     project_name="Trials"
 )
@@ -218,7 +216,7 @@ tuner = BayesianOptimization(
 early_stopping = EarlyStopping(monitor='val_loss', patience=5,
                                verbose=1, mode='min')
 # Tune the model
-tuner.search(X_train_rnn, y_train_rnn, epochs=500, batch_size=128, callbacks=[early_stopping], validation_split=0.3)
+tuner.search(X_train_rnn, y_train_rnn, epochs=500, batch_size=256, callbacks=[early_stopping], validation_split=0.3)
 
 # Get the optimal hyperparameters
 best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
@@ -232,11 +230,8 @@ The optimal emphasis factor for the attention layer is {best_hps.get('emphasis_f
 
 # create a new figure
 fig, ax = plt.subplots()
-
-# set limits for x and y axis
 ax.set_xlim([0, 10])
 ax.set_ylim([0, 10])
-
 # text to display
 text = f"""
 The hyperparameter search is complete. The optimal number of units in the first, second, and third LSTM layers are {best_hps.get('units_1')}, {best_hps.get('units_2')}, and {best_hps.get('units_3')}, respectively.
@@ -244,30 +239,24 @@ The optimal dropout rates are {best_hps.get('dropout_1')}, {best_hps.get('dropou
 The optimal learning rate is {best_hps.get('learning_rate')}.
 The optimal emphasis factor for the attention layer is {best_hps.get('emphasis_factor')}.
 """
-
-# display the text on the plot
 ax.text(0.5, 5, text, fontsize=12, ha='center')
-
-# show the plot
-plt.savefig("CB128b24hMAE.png", bbox_inches='tight', dpi=300)
+plt.savefig("CB256b24hMAE.png", bbox_inches='tight', dpi=300)
 plt.show()
 
 # Build the model with the optimal hyperparameters
 best_model = tuner.hypermodel.build(best_hps)
 
 # Train the best model
-history = best_model.fit(X_train_rnn, y_train_rnn, epochs=500, batch_size=128, verbose=1, callbacks=[early_stopping], validation_split=0.3)
+history = best_model.fit(X_train_rnn, y_train_rnn, epochs=500, batch_size=256, verbose=1, callbacks=[early_stopping], validation_split=0.3)
 
 # Save the model
-best_model.save("CB128b24hMAETT.h5")
+best_model.save("CB256b24hMAETT.h5")
 
 # Evaluate the best model
 best_model.evaluate(X_test_rnn, y_test_rnn, verbose=1)
 
-from tensorflow.keras.models import load_model
-
 # Load the model
-loaded_model = load_model("CB128b24hMAETT.h5", custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
+loaded_model = load_model("CB256b24hMAETT.h5", custom_objects={'CustomAttentionLayer': CustomAttentionLayer})
 
 # Make predictions on the testing data
 test_predictions = loaded_model.predict(X_test_rnn)
@@ -280,7 +269,7 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss (m)')
 plt.title('Training and Validation Loss Over Time')
 plt.legend()
-plt.savefig("CB128b24hMAEtrainnvalidloss.png", bbox_inches='tight', dpi=300)
+plt.savefig("CB256b24hMAEtrainnvalidloss.png", bbox_inches='tight', dpi=300)
 plt.show()
 
 # Reverse the scaling of the predictions
@@ -304,85 +293,54 @@ plt.xlabel('Time (h)')
 plt.ylabel('Water Level (m)')
 plt.title('Actual and Predicted Water Levels')
 plt.legend()
-plt.savefig("CB128b24hMAE.png", bbox_inches='tight', dpi=300)
+plt.savefig("CB256b24hMAE_actual_vs_pred.png", bbox_inches='tight', dpi=300)
 plt.show()
 
-# Assuming the 'DateTime' DataFrame has the same length as 'y_original' and 'test_predictions_original'
-DateTime_indexed = DateTime.iloc[train_size+lookback:]
-        
-data_full = pd.DataFrame({
-    'Date': DateTime_indexed['Date'],
-    'Time (GMT)': DateTime_indexed['Time (GMT)'],
-    'Original Data':  y_original[train_size+lookback:].flatten(),
-    'Test Predictions': test_predictions_original.flatten()
+# Assemble results into a DataFrame
+DateTime_indexed = DateTime.iloc[train_size+lookback:].reset_index(drop=True)
+
+data_results = pd.DataFrame({
+    'Date':              DateTime_indexed['Date'],
+    'Time (GMT)':        DateTime_indexed['Time (GMT)'],
+    'Original Waterlevel':  y_original[train_size+lookback:].flatten(),
+    'Predicted Waterlevel': test_predictions_original.flatten()
 })
-        
-# Display the DataFrame
-print(data_full)
-        
-# Save the DataFrame as a CSV file
-data_full.to_csv('CB128b24hMAE.csv', index=False)
-        
-print("CB128b24hMAE.csv")
 
-# Extract the original data and test predictions from data_full
-orig_data = data_full['Original Data'].to_numpy()
-test_predictions_full = data_full['Test Predictions'].to_numpy()
+# Display and save the full results
+print(data_results.head())
+data_results.to_csv('CB256b24hMAETT_full.csv', index=False)
+print("CB256b24hMAETT_full.csv")
 
-# Calculate the Mean Squared Error (MSE)
-mse = mean_squared_error(orig_data, test_predictions_full)
-print("Mean Squared Error (MSE):", mse)
+# Extract arrays for metric calculations
+orig = data_results['Original Waterlevel'].to_numpy()
+pred = data_results['Predicted Waterlevel'].to_numpy()
 
-# Calculate the Mean Absolute Error (MAE)
-mae = mean_absolute_error(orig_data, test_predictions_full)
-print("Mean Absolute Error (MAE):", mae)
+# Calculate evaluation metrics
+mse  = mean_squared_error(orig, pred)
+mae  = mean_absolute_error(orig, pred)
+rmse = math.sqrt(mse)
+r2   = r2_score(orig, pred)
+corr, _ = pearsonr(orig, pred)
 
-# Calculate the R-squared (Coefficient of Determination)
-r2 = r2_score(orig_data, test_predictions_full)
-print("R-squared (Coefficient of Determination):", r2)
+# For MASE, use a naive one-step lag forecast on the original series
+naive_mae = mean_absolute_error(orig[1:], orig[:-1])
+mase      = mae / naive_mae
 
-# Calculate the correlation coefficient
-correlation_coeff, _ = pearsonr(orig_data, test_predictions_full)
-print("Correlation Coefficient:", correlation_coeff)
+print(f"Mean Squared Error (MSE): {mse:.4f}")
+print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
+print(f"Mean Absolute Error (MAE): {mae:.4f}")
+print(f"R^2 Score: {r2:.4f}")
+print(f"Correlation Coefficient: {corr:.4f}")
+print(f"Mean Absolute Scaled Error (MASE): {mase:.4f}")
 
-# Calculate the Mean Absolute Scaled Error (MASE)
-naive_forecast = orig_data[:-1]
-actual_values = orig_data[1:]
-naive_mae = mean_absolute_error(actual_values, naive_forecast)
-mase = mae / naive_mae
-print("Mean Absolute Scaled Error (MASE):", mase)
-
-# Visual inspection
-plt.figure(figsize=(6, 5))
-plt.plot(orig_data, marker='o', linestyle='', label="Original Data")
-plt.plot(test_predictions_full, marker='o', linestyle='', label="Test Predictions")
-plt.xlabel("Time")
-plt.ylabel("Water Level")
-plt.legend()
-plt.savefig("CB128b24hMAE.png", bbox_inches='tight', dpi=300)
-plt.show()
-
-# Extract the original data and test predictions from data_full
-orig_data = data_full['Original Data'].to_numpy()
-test_predictions_full = data_full['Test Predictions'].to_numpy()
-
-# Calculate the linear regression parameters and R-squared value
-slope, intercept, r_value, p_value, std_err = linregress(orig_data.flatten(), test_predictions_full.flatten())
-r_squared = r_value ** 2
-
-# Start plotting
+# Scatter plot: original vs. predicted with one‐one line
 plt.figure(figsize=(6, 6))
-
-# Plot Original Data vs Test Predictions
-plt.scatter(orig_data, test_predictions_full, alpha=0.5, label=f"Test Predictions (R-squared: {r_squared:.2f})")
-
-# Add a diagonal line (one-to-one line) that represents perfect predictions
-min_value = min(min(orig_data), min(test_predictions_full))
-max_value = max(max(orig_data), max(test_predictions_full))
-plt.plot([min_value, max_value], [min_value, max_value], 'r--')
-
-plt.xlabel("Original Data")
-plt.ylabel("Test Predictions")
-plt.legend(fontsize=14)
-plt.savefig("CB128b24hMAEorigvspred.png", bbox_inches='tight', dpi=300)
+plt.scatter(orig, pred, alpha=0.5, label=f"Predictions (R² = {r2:.2f})")
+plt.plot([orig.min(), orig.max()], [orig.min(), orig.max()], 'r--', label="Perfect fit")
+plt.xlabel("Original Water Level (m)")
+plt.ylabel("Predicted Water Level (m)")
+plt.title("Original vs. Predicted Water Levels")
+plt.legend()
+plt.savefig("CB256b24hMAE_orig_vs_pred.png", bbox_inches='tight', dpi=300)
 plt.show()
+
