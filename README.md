@@ -25,7 +25,7 @@ Contributions are welcome and highly appreciated. You can contribute by:
 - Sending Pull Requests
 
 ## References
-Refer to these papers for a detailed explanation:
+Refer to these paper for a detailed explanation:
 
 - Daramola, S., et al. (2025). Predicting the Evolution of Extreme Water Levels With Long Short-Term Memory Station-Based Approximated Models and Transfer Learning Techniques. https://doi.org/10.1029/2024WR039054
 
