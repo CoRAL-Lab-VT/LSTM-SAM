@@ -104,6 +104,7 @@ print(X_train_rnn.shape, X_test_rnn.shape)
 from keras.layers import Bidirectional, BatchNormalization
 from keras.regularizers import l2
 
+# Custom Attention Layer
 class CustomAttentionLayer(tf.keras.layers.Layer):
     def __init__(self, emphasis_factor=1.5, **kwargs):
         self.emphasis_factor = emphasis_factor
@@ -145,7 +146,6 @@ class CustomAttentionLayer(tf.keras.layers.Layer):
         top_vals, top_idx = tf.nn.top_k(a_flat, k)   # both (batch, k)
 
         # Build a (batch, T) mask where True for any time-step in top_idx
-        # First expand dims so we can compare
         top_idx_exp = tf.expand_dims(top_idx, axis=2)        
         range_row   = tf.reshape(tf.range(T), (1, 1, T))     
         mask_flat   = tf.reduce_any(
