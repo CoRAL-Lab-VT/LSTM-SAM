@@ -89,13 +89,13 @@ class CustomAttentionLayer(tf.keras.layers.Layer):
 
     def call(self, x):
         # x: (batch, T, features)
-        e = K.tanh(K.dot(x, self.W) + self.b)        # (batch, T, 1)
-        a = K.softmax(e, axis=1)                     # (batch, T, 1)
+        e = K.tanh(K.dot(x, self.W) + self.b)        
+        a = K.softmax(e, axis=1)                    
 
         # Squeeze out the features‐singleton so we have (batch, T)
-        a_flat = tf.squeeze(a, axis=-1)              # (batch, T)
+        a_flat = tf.squeeze(a, axis=-1)              
 
-        # Compute how many to pick: top 10% of T, at least 1
+        # Compute the top 10% of T
         T = tf.shape(a_flat)[1]
         k = tf.maximum(1, tf.cast(tf.cast(T, tf.float32) * 0.1, tf.int32))
 
@@ -103,26 +103,24 @@ class CustomAttentionLayer(tf.keras.layers.Layer):
         top_vals, top_idx = tf.nn.top_k(a_flat, k)   # both (batch, k)
 
         # Build a (batch, T) mask where True for any time-step in top_idx
-        # First expand dims so we can compare
-        top_idx_exp = tf.expand_dims(top_idx, axis=2)        # (batch, k, 1)
-        range_row   = tf.reshape(tf.range(T), (1, 1, T))     # (1, k=1, T)
+        top_idx_exp = tf.expand_dims(top_idx, axis=2)       
+        range_row   = tf.reshape(tf.range(T), (1, 1, T))     
         mask_flat   = tf.reduce_any(
-            tf.equal(top_idx_exp, range_row), axis=1          # (batch, T)
+            tf.equal(top_idx_exp, range_row), axis=1          
         )
 
         # Re-expand to (batch, T, 1) to match a’s shape
-        mask = tf.expand_dims(mask_flat, axis=-1)             # (batch, T, 1)
+        mask = tf.expand_dims(mask_flat, axis=-1)            
 
         # Emphasize only those top-10% time-steps
-        a_emph = tf.where(mask, a * self.emphasis_factor, a)  # (batch, T, 1)
+        a_emph = tf.where(mask, a * self.emphasis_factor, a)  
 
         # Final weighted sum over time
-        output = tf.reduce_sum(x * a_emph, axis=1, keepdims=True)  # (batch, 1, features)
+        output = tf.reduce_sum(x * a_emph, axis=1, keepdims=True)  
         return output
 
     def compute_output_shape(self, input_shape):
         return (input_shape[0], 1, input_shape[-1])
-
 
 def kge(y_true, y_pred):
     r, _ = pearsonr(y_true, y_pred)
@@ -157,7 +155,7 @@ def evaluate_and_plot(model, X_test_rnn, y_test_rnn, dates, scaler_y, filename_p
     y_test_filtered = y_true
     test_predictions_filtered = y_pred
 
-    # To limit the plots to Dec 8–14, 1992, uncomment below:
+    # Limit to a specific period, comment out the lines below for the full timeseries prediction:
     start_date = pd.to_datetime('1992-12-08')
     end_date   = pd.to_datetime('1992-12-14')
     mask = (dates >= start_date) & (dates <= end_date)
