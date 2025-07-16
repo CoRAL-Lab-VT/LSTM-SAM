@@ -18,7 +18,6 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 num_cores = multiprocessing.cpu_count()
 print("Number of CPU cores:", num_cores)
-os.environ["OMP_NUM_THREADS"] = "20"
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
     try:
